@@ -16,7 +16,7 @@ data = response.json()
 print(json.dumps(data, indent=4))
 # bills endpoint has ID, house/senate, classification, date effective, created date, updated date, first action date, latest action date, openstates url, latest action description, latest passage date.
 
-sponsors_response = requests.get("https://v3.openstates.org/people", headers=headers, params=params)
+sponsors_response = requests.get("https://v3s.openstates.org/people", headers=headers, params=params)
 sponsors_data = sponsors_response.json()
 print(json.dumps(sponsors_data, indent=4))
 # sponsors endpoint has ID, name, party, role, upper/lower, district,contact info, image, gender, birthdate, openstates url
