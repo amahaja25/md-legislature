@@ -7,21 +7,16 @@ headers = {"X-API-KEY": API_KEY}
 params = {
     "jurisdiction": "Maryland",
     "session": "2025",
-    "per_page": 5
+    "per_page": 5,
+    "include": "sponsorships"
 }
 
 response = requests.get("https://v3.openstates.org/bills", headers=headers, params=params)
 data = response.json()
 
 print(json.dumps(data, indent=4))
-# bills endpoint has ID, house/senate, classification, date effective, created date, updated date, first action date, latest action date, openstates url, latest action description, latest passage date.
 
-sponsors_response = requests.get("https://v3s.openstates.org/people", headers=headers, params=params)
-sponsors_data = sponsors_response.json()
-print(json.dumps(sponsors_data, indent=4))
-# sponsors endpoint has ID, name, party, role, upper/lower, district,contact info, image, gender, birthdate, openstates url
 
-# there doesn't seem to be a way to connect the bills to an individual sponsor. even at the individual bill level, there is no information about the sponsor of said bill.
 
 for bill in data.get("results", []):
     identifier = bill.get("identifier")
@@ -32,11 +27,10 @@ for bill in data.get("results", []):
     if sponsorships:
         print("  Sponsors:")
         for s in sponsorships:
-            name = s.get("name", "Unknown")
+            person = s.get("person", {})
+            full_name = person.get("name", s.get("name", "Unknown"))
             role = s.get("classification", "sponsor")
-            primary = " (primary)" if s.get("primary") else ""
-            print(f"    - {name} [{role}]{primary}")
+            print(f"    - {full_name} [{role}]")
     
     else:
         print("  No sponsors found")
-        # getting no sponsors found for each bill 
