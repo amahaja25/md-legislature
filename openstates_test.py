@@ -12,7 +12,7 @@ headers = {"X-API-KEY": API_KEY}
 params = {
     "jurisdiction": "Maryland",
     "session": "2025",
-    "per_page": 5, # for testing, just keep 5 bills
+    "per_page": 5, # for testing, just keep 5 bills to not overload the API rate limit
     "include": ["sponsorships", "documents"] # include both sponsorships and documents as a list
 }
 
