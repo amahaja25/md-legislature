@@ -4,27 +4,86 @@ import json
 import sqlite3
 import pdfplumber
 import os
+import time
 
 # set API key and headers
-API_KEY = "4dca6d1d-5c67-4cc3-8c68-8ca754b4f158"
+API_KEY = "3f782772-bf3c-4873-80eb-1d011e3a8f83"
 headers = {"X-API-KEY": API_KEY}
 
 params = {
     "jurisdiction": "Maryland",
     "session": "2025",
-    "per_page": 10, # for testing, just keep 10 bills to not overload the API rate limit
-    "include": ["sponsorships", "documents"] # include both sponsorships and documents as a list
+    "per_page": 20,    # Maximum allowed by API
+    "include": ["sponsorships", "documents"]  # API accepts list for multiple includes
 }
 
-response = requests.get("https://v3.openstates.org/bills", headers=headers, params=params)
-data = response.json()
-
-print(json.dumps(data, indent=4))
-
-# store extracted text for each bill
+# Fetch multiple pages
+all_bills = []
 bill_texts = {}
 
-for bill in data.get("results", []):
+max_page = None
+page = 1
+while True:
+    params["page"] = page
+    print(f"\n=== Fetching page {page} ===")
+    
+    try:
+        response = requests.get("https://v3.openstates.org/bills", headers=headers, params=params)
+        response.raise_for_status()  # Raise exception for bad status codes
+        data = response.json()
+    except requests.exceptions.HTTPError as e:
+        if response.status_code == 429:  # Rate limit exceeded
+            print(f"Rate limit exceeded on page {page}. Waiting 60 seconds...")
+            time.sleep(60)  # Wait 60 seconds before retrying
+            try:
+                print(f"Retrying page {page}...")
+                response = requests.get("https://v3.openstates.org/bills", headers=headers, params=params)
+                response.raise_for_status()
+                data = response.json()
+            except Exception as retry_e:
+                print(f"Retry failed for page {page}: {retry_e}")
+                break
+        else:
+            print(f"HTTP error fetching page {page}: {e}")
+            break
+    except Exception as e:
+        print(f"Error fetching page {page}: {e}")
+        break
+    
+    # Get pagination info from first response
+    if page == 1:
+        pagination = data.get("pagination", {})
+        max_page = pagination.get("max_page", 1)
+        total_items = pagination.get("total_items", 0)
+        print(f"Total items available: {total_items}")
+        print(f"Total pages available: {max_page}")
+        per_page = pagination.get("per_page", 20)
+        print(f"Items per page: {per_page}")
+    
+    # Add bills from this page
+    results = data.get("results", [])
+    print(f"Page {page}: {len(results)} bills fetched")
+    all_bills.extend(results)
+    
+    # Break if no more results or we've reached the last page
+    if not results:
+        print(f"Breaking: No more results on page {page}")
+        break
+    if page >= max_page:
+        print(f"Breaking: Reached max_page {max_page} on page {page}")
+        break
+    
+    print(f"Continuing to page {page + 1}...")
+    page += 1
+    
+    # Add a small delay to avoid rate limiting
+    time.sleep(1)  # Wait 1 second between requests
+
+print(f"Total bills fetched: {len(all_bills)}")
+print(f"Pages processed: {page}")
+
+# store extracted text for each bill
+for bill in all_bills:
     identifier = bill.get("identifier")
     title = bill.get("title")
     chamber = bill.get("from_organization", {}).get("name", "unknown").capitalize()
@@ -85,21 +144,28 @@ for bill in data.get("results", []):
     
     # Store the extracted text for this bill
     bill_texts[identifier] = bill_text
+
+
     
 # connect to sqlite3 db
 conn = sqlite3.connect('bills.db')
 cursor = conn.cursor()
 
-# Drop the old table and create a new structure with one row per bill
-cursor.execute('DROP TABLE IF EXISTS bills')
+# Create table only if it doesn't exist (don't drop existing data)
+# cursor.execute('DROP TABLE IF EXISTS bills')
+
 
 # limit to 20 sponsors per bill (in the sample of ten, one bill has 18 sponsors and another had 16)
 cursor.execute('''
-    CREATE TABLE bills (
+    CREATE TABLE IF NOT EXISTS bills (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         identifier TEXT UNIQUE,
         title TEXT,
         text TEXT,
+        chamber TEXT,
+        first_action_date TEXT,
+        latest_action_date TEXT,
+        latest_action_description TEXT,
         sponsor_1_name TEXT, sponsor_1_role TEXT, sponsor_1_party TEXT, sponsor_1_district TEXT,
         sponsor_2_name TEXT, sponsor_2_role TEXT, sponsor_2_party TEXT, sponsor_2_district TEXT,
         sponsor_3_name TEXT, sponsor_3_role TEXT, sponsor_3_party TEXT, sponsor_3_district TEXT,
@@ -125,10 +191,15 @@ cursor.execute('''
 ''')
 
 # Insert the bill info into sqlite3 db 
-for bill in data.get("results", []):
+for bill in all_bills:
     identifier = bill.get("identifier")
     title = bill.get("title")
-    bill_text = bill_texts.get(identifier, "")  # Get extracted text 
+    bill_text = bill_texts.get(identifier, "") 
+    chamber = bill.get("from_organization", {}).get("name", "unknown").capitalize()
+    first_action_date = bill.get("first_action_date", "unknown")
+    latest_action_date = bill.get("latest_action_date", "unknown")
+    latest_action_description = bill.get("latest_action_description", "unknown")
+     # Get extracted text 
     
     sponsorships = bill.get("sponsorships", [])
     
@@ -158,10 +229,14 @@ for bill in data.get("results", []):
         sponsor_data[f'sponsor_{i+1}_party'] = None
         sponsor_data[f'sponsor_{i+1}_district'] = None
     
-    # Insert single row for this bill
-    cursor.execute('''
-        INSERT OR REPLACE INTO bills (
-            identifier, title, text, total_sponsors,
+    # Check if bill already exists
+    cursor.execute('SELECT COUNT(*) FROM bills WHERE identifier = ?', (identifier,))
+    if cursor.fetchone()[0] == 0:
+        # Insert single row for this bill only if it doesn't exist
+        cursor.execute('''
+            INSERT INTO bills (
+            identifier, title, text, chamber,
+            first_action_date, latest_action_date, latest_action_description, total_sponsors,
             sponsor_1_name, sponsor_1_role, sponsor_1_party, sponsor_1_district,
             sponsor_2_name, sponsor_2_role, sponsor_2_party, sponsor_2_district,
             sponsor_3_name, sponsor_3_role, sponsor_3_party, sponsor_3_district,
@@ -182,9 +257,10 @@ for bill in data.get("results", []):
             sponsor_18_name, sponsor_18_role, sponsor_18_party, sponsor_18_district,
             sponsor_19_name, sponsor_19_role, sponsor_19_party, sponsor_19_district,
             sponsor_20_name, sponsor_20_role, sponsor_20_party, sponsor_20_district
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ''', (
-        identifier, title, bill_text, total_sponsors,
+        identifier, title, bill_text, chamber,
+        first_action_date, latest_action_date, latest_action_description, total_sponsors,
         sponsor_data['sponsor_1_name'], sponsor_data['sponsor_1_role'], sponsor_data['sponsor_1_party'], sponsor_data['sponsor_1_district'],
         sponsor_data['sponsor_2_name'], sponsor_data['sponsor_2_role'], sponsor_data['sponsor_2_party'], sponsor_data['sponsor_2_district'],
         sponsor_data['sponsor_3_name'], sponsor_data['sponsor_3_role'], sponsor_data['sponsor_3_party'], sponsor_data['sponsor_3_district'],
@@ -205,7 +281,10 @@ for bill in data.get("results", []):
         sponsor_data['sponsor_18_name'], sponsor_data['sponsor_18_role'], sponsor_data['sponsor_18_party'], sponsor_data['sponsor_18_district'],
         sponsor_data['sponsor_19_name'], sponsor_data['sponsor_19_role'], sponsor_data['sponsor_19_party'], sponsor_data['sponsor_19_district'],
         sponsor_data['sponsor_20_name'], sponsor_data['sponsor_20_role'], sponsor_data['sponsor_20_party'], sponsor_data['sponsor_20_district']
-    ))
+        ))
+        print(f"  Added {identifier} to database")
+    else:
+        print(f"  {identifier} already exists in database, skipping")
 
 conn.commit()
 conn.close()
